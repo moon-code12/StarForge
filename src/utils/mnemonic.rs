@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use bip39::{Language, Mnemonic};
+use bip39::{Language, Mnemonic, WordCount as Bip39WordCount};
 use ed25519_dalek::SigningKey;
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
@@ -26,7 +26,11 @@ impl WordCount {
 
 /// Generate a new BIP39 mnemonic phrase in English.
 pub fn generate_phrase(count: WordCount) -> Result<String> {
-    let mnemonic = Mnemonic::generate_in(Language::English, count.as_usize())
+    let word_count = match count {
+        WordCount::Words12 => Bip39WordCount::Words12,
+        WordCount::Words24 => Bip39WordCount::Words24,
+    };
+    let mnemonic = Mnemonic::generate_in(Language::English, word_count)
         .map_err(|e| anyhow!("Failed to generate mnemonic: {}", e))?;
     Ok(mnemonic.to_string())
 }

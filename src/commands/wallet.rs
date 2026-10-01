@@ -323,29 +323,24 @@ pub enum WalletCommands {
     },
     /// Derive all 10 Stellar addresses (m/44'/148'/0..9') from a BIP39 recovery phrase
     Derive,
-    /// Sign a base64 transaction envelope XDR with a browser wallet or a local key
+    /// Move wallet secrets into an OS-native secret backend
+    ///
+    /// Only `--to keychain` is supported. Each plaintext wallet secret is
+    /// written to the macOS Keychain, the Windows Credential Manager, or the
+    /// Linux Secret Service, and the configuration is rewritten to keep only a
+    /// `keychain:<key>` reference instead of the secret.
+    ///
+    /// On hosts without a usable OS keychain (for example a headless CI
+    /// runner), a permission-restricted `secrets.json` fallback next to the
+    /// config is used instead, and the command prints a notice. Migration is
+    /// idempotent and never drops a key.
     ///
     /// Example:
-    /// starforge wallet sign-tx --transaction unsigned.xdr --signer browser
-    SignTx {
-        /// Path to a file containing the base64 transaction envelope XDR
+    /// starforge wallet migrate --to keychain
+    Migrate {
+        /// Target secret backend. Only `keychain` is supported.
         #[arg(long)]
-        transaction: PathBuf,
-        /// Signer backend: `browser` uses a one-time localhost handoff
-        #[arg(long, value_enum, default_value = "browser")]
-        signer: TxSignerKind,
-        /// Wallet name to use when `--signer local`
-        #[arg(long)]
-        wallet: Option<String>,
-        /// Network for the signing passphrase
-        #[arg(long, default_value = "testnet", value_parser = ["testnet", "mainnet"])]
-        network: String,
-        /// Where to write the signed XDR (defaults to stdout)
-        #[arg(long)]
-        output: Option<PathBuf>,
-        /// Seconds to wait for the browser wallet before aborting
-        #[arg(long, default_value_t = crate::utils::browser_signer::DEFAULT_HANDOFF_TIMEOUT_SECS)]
-        timeout: u64,
+        to: String,
     },
     /// Multi-signature account management
     #[command(subcommand)]
@@ -372,15 +367,6 @@ pub enum WalletCommands {
         #[command(flatten)]
         args: crate::commands::diagnostics::DiagnosticsArgs,
     },
-}
-
-/// Backend used by `starforge wallet sign-tx`.
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum TxSignerKind {
-    /// Sign with a browser wallet via a one-time localhost handoff
-    Browser,
-    /// Sign with a locally stored secret key
-    Local,
 }
 
 /// Backend used by `starforge wallet sign-tx`.
@@ -581,7 +567,6 @@ pub async fn handle(cmd: WalletCommands) -> Result<()> {
                 hd_path,
                 accounts,
             )
-            .await
         }
         WalletCommands::ImportShares { shares, output } => import_shares(shares, output),
         WalletCommands::Connect { device, timeout } => connect_hardware(device, &timeout),
@@ -601,14 +586,6 @@ pub async fn handle(cmd: WalletCommands) -> Result<()> {
             parallelism,
             use_global,
         } => tune_wallet_kdf(&name, mem, iterations, parallelism, use_global),
-        WalletCommands::SignTx {
-            transaction,
-            signer,
-            wallet,
-            network,
-            output,
-            timeout,
-        } => sign_transaction_file(transaction, signer, wallet, network, output, timeout),
         WalletCommands::Multisig(cmd) => handle_multisig(cmd).await,
         WalletCommands::Tx { args } => crate::commands::tx::handle(args).await,
         WalletCommands::Auth { args } => crate::commands::sep::handle(args).await,
@@ -931,6 +908,10 @@ fn dry_run_plan(cmd: &WalletCommands) -> Option<DryRunPlan> {
         | WalletCommands::Derive
         | WalletCommands::Multisig(MultisigCommands::List)
         | WalletCommands::Multisig(MultisigCommands::Show { .. }) => None,
+        WalletCommands::Migrate { .. }
+        | WalletCommands::Tx { .. }
+        | WalletCommands::Auth { .. }
+        | WalletCommands::Diagnostics { .. } => None,
         WalletCommands::Watch {
             name,
             address,
@@ -1492,7 +1473,7 @@ fn watch_wallet(
     config::save(&cfg)?;
 
     if also_alias {
-        let mut book = crate::utils::aliases::AliasBook::load()
+        let mut book = crate::utils::aliases::AliasStore::load()
             .map_err(|e| anyhow::anyhow!("alias book: {e}"))?;
         book.set(&network, &name, &address)
             .map_err(|e| anyhow::anyhow!("alias set: {e}"))?;

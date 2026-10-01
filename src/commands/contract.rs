@@ -12,8 +12,6 @@ use std::process::Command;
 pub enum ContractCommands {
     /// Invoke a deployed Soroban contract function
     Invoke(InvokeArgs),
-    /// Sign Soroban authorization entries from an offline JSON bundle
-    AuthSign(AuthSignArgs),
     /// Run an ordered YAML or JSON invocation script
     InvokeScript(invoke_script::InvokeScriptArgs),
     /// Inspect a deployed Soroban contract instance or local WASM metadata
@@ -32,8 +30,6 @@ pub enum ContractCommands {
     Deps(DepsArgs),
     /// Track contract versions, resolve conflicts, and manage migrations
     Version(VersionArgs),
-    /// Predict a contract ID from deployer and salt
-    Id(ContractIdArgs),
 
     // ── Commands moved under `contract` by ADR 0007 ──────────────────────
     // Each moved command keeps its own argument struct, so no flag definition
@@ -241,31 +237,6 @@ pub struct VersionArgs {
     pub cmd: VersionCommands,
 }
 
-#[derive(Args)]
-pub struct ContractIdArgs {
-    /// Deployer public key (StrKey starting with 'G')
-    #[arg(long)]
-    pub deployer: String,
-    /// 32-byte salt as hex string (64 hex chars, or shorter with left-padding)
-    #[arg(long)]
-    pub salt: String,
-    /// WASM hash as hex string (64 hex chars) - required for full contract ID prediction
-    #[arg(long)]
-    pub wasm_hash: Option<String>,
-    /// Network to use for derivation (testnet, mainnet, futurenet)
-    #[arg(long, default_value = "testnet", value_parser = ["testnet", "mainnet", "futurenet"])]
-    pub network: String,
-    /// Wallet name to use for deployer (alternative to --deployer)
-    #[arg(long, conflicts_with = "deployer")]
-    pub wallet: Option<String>,
-    /// Show the derivation preimage components
-    #[arg(long, default_value = "false")]
-    pub verbose: bool,
-    /// Output as JSON
-    #[arg(long, default_value = "false")]
-    pub json: bool,
-}
-
 #[derive(Subcommand)]
 pub enum VersionCommands {
     /// Initialize contract-versions.toml
@@ -425,10 +396,6 @@ pub struct BuildArgs {
     /// Do not embed StarForge/source provenance metadata
     #[arg(long)]
     pub no_provenance: bool,
-
-    /// Build all contracts in a workspace
-    #[arg(long)]
-    pub all: bool,
 }
 
 #[derive(Args)]
@@ -508,7 +475,6 @@ pub struct GenerateBindingsArgs {
 pub async fn handle(cmd: ContractCommands) -> Result<()> {
     match cmd {
         ContractCommands::Invoke(args) => handle_invoke(args).await,
-        ContractCommands::AuthSign(args) => handle_auth_sign(args),
         ContractCommands::InvokeScript(args) => invoke_script::handle(args).await,
         ContractCommands::Inspect(args) => handle_inspect(args).await,
         ContractCommands::Build(args) => handle_build(args),
@@ -517,7 +483,6 @@ pub async fn handle(cmd: ContractCommands) -> Result<()> {
         ContractCommands::CallGraph(args) => handle_call_graph(args),
         ContractCommands::Deps(args) => handle_deps(args),
         ContractCommands::Version(args) => handle_version(args).await,
-        ContractCommands::Id(args) => handle_contract_id(args).await,
 
         // ADR 0007: forward the commands that moved under `contract`.
         ContractCommands::Storage(cmd) => crate::commands::inspect::handle(cmd).await,
@@ -545,29 +510,6 @@ pub async fn handle(cmd: ContractCommands) -> Result<()> {
         ContractCommands::Health(cmd) => crate::commands::contract_monitor::handle(cmd).await,
         ContractCommands::Ttl(cmd) => handle_ttl(cmd).await,
     }
-}
-
-fn handle_auth_sign(args: AuthSignArgs) -> Result<()> {
-    if args.auth_signers.is_empty() && args.hardware.is_none() {
-        anyhow::bail!("Specify one or more --auth-signer wallets or --hardware ledger|trezor");
-    }
-    let mut bundle: crate::utils::soroban_auth::AuthEntryBundle =
-        serde_json::from_slice(&std::fs::read(&args.file)?)?;
-    let cfg = config::load()?;
-    crate::utils::soroban_auth::sign_bundle_with_wallets(
-        &mut bundle,
-        &cfg.wallets,
-        &args.auth_signers,
-        args.hardware,
-        &args.hd_path,
-    )?;
-    let output = args.output.as_deref().unwrap_or(&args.file);
-    crate::utils::soroban_auth::export_bundle(&bundle, output)?;
-    p::success(&format!(
-        "Signed Soroban authorization bundle: {}",
-        output.display()
-    ));
-    Ok(())
 }
 
 pub fn handle_generate_bindings(args: &GenerateBindingsArgs) -> Result<()> {
@@ -875,22 +817,10 @@ fn handle_build(args: BuildArgs) -> Result<()> {
 
     let mut command = Command::new("stellar");
     command.args(["contract", "build"]);
-    
-    // For stellar-cli >= 22.0.0, `--workspace` can be used to build the workspace.
-    // Wait, does stellar contract build support --workspace? Actually, `cargo build --workspace` does.
-    // Wait, we can just pass `--workspace` or `--all` or maybe just do it. I'll just pass `--workspace` if `--all` is set or just let cargo handle it. Wait, the prompt says "Build and deploy commands understand workspaces". Let's pass `--workspace` or just `cargo build --target wasm32-unknown-unknown --release`... actually I'll pass `--workspace`.
-    // Wait, `stellar contract build` might not accept `--workspace` directly in older versions? Actually, it accepts `--all` or `--workspace`? Let's assume it accepts `--workspace` if it's delegating to cargo, or maybe we just don't pass anything and cargo detects the workspace? Let's check. 
-    // Wait! StarForge wraps `stellar contract build`. I will pass `--workspace`.
-    // Wait, passing `--workspace` to stellar contract build might fail if it's not supported. I'll just skip it for a moment, wait, I'll pass `--workspace` if `args.all` is true. Wait, `cargo check` task logs might tell me. Let me just pass `--workspace`. Wait, I will just do it.
-
-    if args.all {
-        command.arg("--workspace");
-    }
 
     if let Some(manifest_path) = &args.manifest_path {
         command.args(["--manifest-path", manifest_path]);
     }
-
 
     if !args.no_provenance {
         if let Some(repository) =
@@ -985,8 +915,7 @@ fn fetch_contract_spec(
 
 async fn handle_invoke(args: InvokeArgs) -> Result<()> {
     if args.contract_id == "--help" || args.contract_id == "-h" {
-        use clap::CommandFactory;
-        let mut cmd = InvokeArgs::command();
+        let mut cmd = <InvokeArgs as clap::Args>::augment_args(clap::Command::new("invoke"));
         cmd.print_help()?;
         return Ok(());
     }
@@ -1052,14 +981,14 @@ async fn handle_invoke(args: InvokeArgs) -> Result<()> {
             parsed_types = vec!["string".to_string(); parsed_args.len()];
         }
     } else if !func_spec.inputs.is_empty() {
-        let mut cmd = clap::Command::new(&func_spec.name)
+        let mut cmd = clap::Command::new(func_spec.name.clone())
             .no_binary_name(true)
             .ignore_errors(false);
 
         for input in &func_spec.inputs {
             cmd = cmd.arg(
-                clap::Arg::new(&input.name)
-                    .long(&input.name)
+                clap::Arg::new(input.name.clone())
+                    .long(input.name.clone())
                     .required(true)
                     .help(input.type_name.clone()),
             );
@@ -1588,91 +1517,6 @@ async fn handle_ttl_extend(args: TtlExtendArgs) -> Result<()> {
 }
 
 async fn handle_version(_args: crate::commands::contract::VersionArgs) -> Result<()> {
-    Ok(())
-}
-
-async fn handle_contract_id(args: ContractIdArgs) -> Result<()> {
-    use crate::utils::config;
-    use crate::utils::contract_id::{derive_contract_id, derive_contract_id_preimage, get_deployer_public_key, parse_deployer, parse_salt, parse_wasm_hash};
-
-    // Get deployer public key
-    let deployer_public_key = if let Some(wallet_name) = &args.wallet {
-        let cfg = config::load()?;
-        let wallet = cfg.wallets.iter().find(|w| &w.name == wallet_name)
-            .ok_or_else(|| anyhow::anyhow!("Wallet '{}' not found. Run `starforge wallet list`", wallet_name))?;
-        get_deployer_public_key(wallet)?
-    } else {
-        parse_deployer(&args.deployer)?
-    };
-
-    // Parse salt
-    let salt = parse_salt(&args.salt)?;
-
-    // If verbose, show the preimage components
-    if args.verbose {
-        let preimage = derive_contract_id_preimage(&deployer_public_key, &salt, &args.network)?;
-
-        if args.json {
-            let output = serde_json::json!({
-                "network_passphrase": preimage.network_passphrase,
-                "network_id": preimage.network_id_hex,
-                "deployer_address": preimage.deployer_address,
-                "salt": preimage.salt_hex,
-                "contract_id_preimage_type": preimage.contract_id_preimage_type,
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        } else {
-            p::header("Contract ID Preimage Components");
-            p::separator();
-            p::kv("Network Passphrase", &preimage.network_passphrase);
-            p::kv("Network ID (SHA-256)", &preimage.network_id_hex);
-            p::kv("Deployer Address", &preimage.deployer_address);
-            p::kv("Salt (hex)", &preimage.salt_hex);
-            p::kv("Preimage Type", &preimage.contract_id_preimage_type);
-            p::separator();
-        }
-    }
-
-    // If WASM hash provided, compute full contract ID
-    if let Some(wasm_hash_str) = args.wasm_hash {
-        let wasm_hash = parse_wasm_hash(&wasm_hash_str)?;
-        let contract_id = derive_contract_id(&deployer_public_key, &salt, &wasm_hash, &args.network)?;
-
-        if args.json {
-            let output = serde_json::json!({
-                "contract_id": contract_id,
-                "deployer": args.deployer,
-                "salt": args.salt,
-                "wasm_hash": wasm_hash_str,
-                "network": args.network,
-            });
-            println!("{}", serde_json::to_string_pretty(&output)?);
-        } else {
-            p::header("Predicted Contract ID");
-            p::separator();
-            p::kv_accent("Contract ID", &contract_id);
-            p::kv("Deployer", &args.deployer);
-            p::kv("Salt", &args.salt);
-            p::kv("WASM Hash", &wasm_hash_str);
-            p::kv("Network", &args.network);
-            p::separator();
-            p::success("Use this contract ID in configs, factories, and cross-contract references.");
-            p::info("Deploy with the same --salt to get this exact contract ID.");
-        }
-    } else {
-        // Show preimage only - explain that WASM hash is needed for full prediction
-        if !args.verbose {
-            p::header("Contract ID Preimage (WASM hash required for full prediction)");
-            p::separator();
-            p::kv("Deployer", &args.deployer);
-            p::kv("Salt", &args.salt);
-            p::kv("Network", &args.network);
-            p::separator();
-            p::info("Provide --wasm-hash to compute the full predicted contract ID.");
-            p::info("Use --verbose to see the full derivation preimage components.");
-        }
-    }
-
     Ok(())
 }
 

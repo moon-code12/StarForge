@@ -128,12 +128,14 @@ async fn wrap(args: WrapArgs) -> Result<()> {
     let result = soroban_native::wrap_asset_native(asset, wallet, &args.network, &signing).await?;
 
     if args.json || output::is_json_mode_enabled() {
+        let already_deployed =
+            result.wasm_already_uploaded && result.create_tx_hash.is_empty();
         return output::print_json(&WrapResponse {
             asset: args.asset,
             network: args.network,
             contract_id: result.contract_id,
             tx_hash: result.create_tx_hash,
-            already_deployed: result.wasm_already_uploaded && result.create_tx_hash.is_empty(),
+            already_deployed,
         });
     }
 

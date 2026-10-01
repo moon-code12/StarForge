@@ -274,7 +274,7 @@ async fn sign_submit_poll(
         .ok_or_else(|| anyhow::anyhow!("sendTransaction missing hash: {sent}"))?
         .to_string();
 
-    let status = poll_transaction_status(&hash, network, PollConfig::default()).await?;
+    let status = poll_transaction_status(&hash, network, &PollConfig::default()).await?;
     match status.status {
         TxStatus::Success | TxStatus::Duplicate => Ok(hash),
         other => bail!(

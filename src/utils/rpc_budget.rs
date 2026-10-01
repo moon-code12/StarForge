@@ -132,7 +132,7 @@ impl RpcBudget {
     ///
     /// This enforces both concurrency limits (via semaphore) and QPS limits
     /// (via rate limiting). Returns an error if budgets are exhausted.
-    pub async fn acquire_permit(&self) -> Result<RpcPermit> {
+    pub async fn acquire_permit(&self) -> Result<RpcPermit<'_>> {
         if !self.config.enabled {
             return Ok(RpcPermit::new(None, self.telemetry_enabled));
         }
@@ -197,14 +197,17 @@ impl RpcBudget {
 
 /// A permit that represents permission to make an RPC request.
 /// When dropped, it releases the concurrency permit.
-pub struct RpcPermit {
-    _permit: Option<tokio::sync::SemaphorePermit<'static>>,
+pub struct RpcPermit<'a> {
+    _permit: Option<tokio::sync::SemaphorePermit<'a>>,
     telemetry_enabled: bool,
     start_time: Option<Instant>,
 }
 
-impl RpcPermit {
-    fn new(permit: Option<tokio::sync::SemaphorePermit<'static>>, telemetry_enabled: bool) -> Self {
+impl<'a> RpcPermit<'a> {
+    fn new(
+        permit: Option<tokio::sync::SemaphorePermit<'a>>,
+        telemetry_enabled: bool,
+    ) -> Self {
         let start_time = if telemetry_enabled {
             Some(Instant::now())
         } else {
@@ -219,7 +222,7 @@ impl RpcPermit {
     }
 }
 
-impl Drop for RpcPermit {
+impl Drop for RpcPermit<'_> {
     fn drop(&mut self) {
         if self.telemetry_enabled {
             if let Some(start) = self.start_time {

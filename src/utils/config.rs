@@ -269,19 +269,6 @@ pub fn validate_config(cfg: &Config) -> Result<()> {
         if let Some(ref friendbot_url) = net_cfg.friendbot_url {
             validate_endpoint_url(friendbot_url, &format!("network '{}'.friendbot_url", name))?;
         }
-        if let Some(ref ca_bundle) = net_cfg.ca_bundle {
-            // Only the shape is checked here: the config is loaded on every
-            // command, and a bundle that lives on a share which happens to be
-            // unmounted must not make `starforge config unset` impossible.
-            // `config set network.ca_bundle` and the doctor check verify that
-            // the file exists and parses.
-            if ca_bundle.trim().is_empty() {
-                anyhow::bail!(
-                    "network '{}'.ca_bundle is empty: unset it or point it at a PEM bundle",
-                    name
-                );
-            }
-        }
     }
 
     let mut seen_wallets = std::collections::HashSet::new();
@@ -620,15 +607,6 @@ pub struct NetworkConfig {
     pub friendbot_url: Option<String>,
     #[serde(default)]
     pub passphrase: Option<String>,
-    /// Path to a PEM bundle of extra root certificates to trust when talking to
-    /// this network (#902).
-    ///
-    /// Set with `starforge config set network.ca_bundle <path>`; `STARFORGE_CA_BUNDLE`
-    /// overrides it for a single invocation. The bundle is *added* to the
-    /// platform roots, so it only ever widens what this CLI accepts — which is
-    /// what private deployments and interception proxies need.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ca_bundle: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -817,14 +795,15 @@ pub fn upgrade_wallet_kdf(
     new_kdf: Option<crypto::KdfOptions>,
 ) -> Result<()> {
     let mut cfg = load()?;
+    let names: Vec<String> = cfg.wallets.iter().map(|w| w.name.clone()).collect();
     let wallet = cfg
         .wallets
         .iter_mut()
         .find(|w| w.name == wallet_name)
         .ok_or_else(|| {
-            let names: Vec<&str> = cfg.wallets.iter().map(|w| w.name.as_str()).collect();
+            let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let suggestion =
-                crate::utils::suggestion::did_you_mean(wallet_name, &names).unwrap_or_default();
+                crate::utils::suggestion::did_you_mean(wallet_name, &name_refs).unwrap_or_default();
             anyhow::anyhow!("Wallet '{}' not found{}", wallet_name, suggestion)
         })?;
 
@@ -872,7 +851,6 @@ impl Default for Config {
                 soroban_rpc_url: Some("https://soroban-testnet.stellar.org".to_string()),
                 friendbot_url: Some("https://friendbot.stellar.org".to_string()),
                 passphrase: Some("Test SDF Network ; September 2015".to_string()),
-                ca_bundle: None,
             },
         );
         networks.insert(
@@ -882,7 +860,6 @@ impl Default for Config {
                 soroban_rpc_url: Some("https://mainnet.sorobanrpc.com".to_string()),
                 friendbot_url: None,
                 passphrase: Some("Public Global Stellar Network ; September 2015".to_string()),
-                ca_bundle: None,
             },
         );
         networks.insert(
@@ -892,7 +869,6 @@ impl Default for Config {
                 soroban_rpc_url: Some("http://localhost:8000/rpc".to_string()),
                 friendbot_url: None,
                 passphrase: Some("Test SDF Network ; September 2015".to_string()),
-                ca_bundle: None,
             },
         );
 
@@ -908,6 +884,7 @@ impl Default for Config {
             install_id: None,
             feature_flags: FeatureFlagsConfig::default(),
             ai_telemetry: AiTelemetryConfig::default(),
+            event_sinks: None,
         }
     }
 }
@@ -1512,25 +1489,6 @@ pub fn validate_config_integrity(cfg: &Config) -> Vec<DoctorFinding> {
         Err(e) => findings.push(DoctorFinding::fail("network", e.to_string())),
     }
 
-    // #902: a CA bundle that cannot be read is a connectivity failure waiting
-    // to happen, so `doctor` reports it instead of leaving it to the first
-    // HTTPS request.
-    match cfg.networks.get(&cfg.network).and_then(|net| net.ca_bundle.as_ref()) {
-        None => findings.push(DoctorFinding::pass(
-            "network.ca_bundle",
-            "no custom CA bundle for the active network",
-        )),
-        Some(path) => match crate::utils::http_client::load_ca_certificates(
-            std::path::Path::new(path.trim()),
-        ) {
-            Ok(certificates) => findings.push(DoctorFinding::pass(
-                "network.ca_bundle",
-                format!("{} trusted root certificate(s) from {}", certificates.len(), path),
-            )),
-            Err(e) => findings.push(DoctorFinding::fail("network.ca_bundle", e.to_string())),
-        },
-    }
-
     if cfg.wallets.is_empty() {
         findings.push(DoctorFinding::pass("wallet", "no wallets configured"));
     } else {
@@ -2077,7 +2035,6 @@ pub fn ensure_default_networks(cfg: &mut Config) {
             soroban_rpc_url: Some("https://soroban-testnet.stellar.org".to_string()),
             friendbot_url: Some("https://friendbot.stellar.org".to_string()),
             passphrase: Some("Test SDF Network ; September 2015".to_string()),
-            ca_bundle: None,
         });
     cfg.networks
         .entry("mainnet".to_string())
@@ -2086,7 +2043,6 @@ pub fn ensure_default_networks(cfg: &mut Config) {
             soroban_rpc_url: Some("https://mainnet.sorobanrpc.com".to_string()),
             friendbot_url: None,
             passphrase: Some("Public Global Stellar Network ; September 2015".to_string()),
-            ca_bundle: None,
         });
     cfg.networks
         .entry("docker-testnet".to_string())
@@ -2095,7 +2051,6 @@ pub fn ensure_default_networks(cfg: &mut Config) {
             soroban_rpc_url: Some("http://localhost:8000/rpc".to_string()),
             friendbot_url: None,
             passphrase: Some("Test SDF Network ; September 2015".to_string()),
-            ca_bundle: None,
         });
 }
 
@@ -2163,49 +2118,9 @@ pub fn add_custom_network(
             soroban_rpc_url,
             friendbot_url,
             passphrase,
-            ca_bundle: None,
         },
     );
     Ok(())
-}
-
-/// Set (or clear) `network.ca_bundle` on a network.
-///
-/// `None` unsets it. The bundle is validated before it is stored so a typo is
-/// reported by the command that made it instead of by the next HTTP request
-/// (#902). Returns the previous value.
-pub fn set_network_ca_bundle(
-    config: &mut Config,
-    network: &str,
-    ca_bundle: Option<PathBuf>,
-) -> Result<Option<String>> {
-    if let Some(path) = &ca_bundle {
-        let as_str = path.to_str().ok_or_else(|| {
-            anyhow::anyhow!(
-                "CA bundle path '{}' is not valid UTF-8",
-                path.display()
-            )
-        })?;
-        if as_str.trim().is_empty() {
-            anyhow::bail!("CA bundle path is empty");
-        }
-        crate::utils::http_client::load_ca_certificates(path).with_context(|| {
-            format!(
-                "'{}' is not usable as a CA bundle",
-                path.display()
-            )
-        })?;
-    }
-
-    let entry = config
-        .networks
-        .get_mut(network)
-        .ok_or_else(|| anyhow::anyhow!("Network '{}' not found", network))?;
-
-    Ok(std::mem::replace(
-        &mut entry.ca_bundle,
-        ca_bundle.map(|path| path.display().to_string()),
-    ))
 }
 
 /// Remove a custom network from config. Built-in networks are protected.

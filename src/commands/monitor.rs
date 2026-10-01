@@ -254,6 +254,7 @@ impl EventPipeline<'_> {
 
 async fn monitor_contract(contract_id: &str, args: &MonitorArgs, network: &str) -> Result<()> {
     config::validate_contract_id(contract_id)?;
+    let cfg = config::load()?;
 
     let legacy_filter_set = parse_legacy_filter(args.events.as_deref());
     let stream_filters = build_stream_filters(
@@ -318,12 +319,10 @@ async fn monitor_contract(contract_id: &str, args: &MonitorArgs, network: &str) 
     let mut highest_cursor: Option<String> = None;
     for sink in &sinks {
         if let Some(c) = sink.get_cursor().await? {
-            if let Some(existing) = &highest_cursor {
-                if existing != &c {
-                    anyhow::bail!("configured event sinks contain different RPC cursors; align or reset their cursor stores before resuming");
-                }
-            } else {
-                highest_cursor = Some(c);
+            match &highest_cursor {
+                Some(hc) if c > *hc => highest_cursor = Some(c),
+                None => highest_cursor = Some(c),
+                _ => {}
             }
         }
     }
@@ -395,12 +394,12 @@ async fn monitor_contract(contract_id: &str, args: &MonitorArgs, network: &str) 
                     }
                 }
 
-                if !sinks.is_empty() {
+                if !matched_batch.is_empty() && !sinks.is_empty() {
                     for sink in &mut sinks {
                         if let Err(e) = sink.process_batch(&matched_batch).await {
                             notifications::warn(&format!("Sink processing error: {}", e));
-                        } else if let Some(cursor) = stream.cursor() {
-                            if let Err(e) = sink.save_cursor(cursor.to_owned()).await {
+                        } else if let Some(last) = matched_batch.last() {
+                            if let Err(e) = sink.save_cursor(last.id.clone()).await {
                                 notifications::warn(&format!("Failed to save cursor: {}", e));
                             }
                         }

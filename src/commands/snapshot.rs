@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use stellar_strkey::Contract;
 use stellar_xdr::curr::{
     ContractDataDurability, Hash, LedgerEntryData, LedgerKey, LedgerKeyContractCode,
-    LedgerKeyContractData, ScAddress, ScVal,
+    LedgerKeyContractData, ReadXdr, ScAddress, ScVal,
 };
 
 use crate::utils::testnet_integration::{SorobanNetwork, TestnetClient, TestnetConfig};

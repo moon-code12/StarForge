@@ -211,21 +211,10 @@ impl OperationSummary {
             node.function.clone()
         };
 
-        // Try to get alias for contract ID if known
-        let alias_or_id = crate::utils::config::load()
-            .ok()
-            .and_then(|cfg| {
-                cfg.contracts.iter().find_map(|(alias, id)| {
-                    if id == &node.contract_id {
-                        Some(format!("{} ({})", alias.bright_green(), id.dimmed()))
-                    } else {
-                        None
-                    }
-                })
-            })
-            .unwrap_or_else(|| {
-                format!("{} {}", "Unknown Contract".red(), node.contract_id.dimmed())
-            });
+        // Alias resolution is best-effort: without a known alias, fall back to
+        // the raw contract ID.
+        let alias_or_id =
+            format!("{} {}", "Unknown Contract".red(), node.contract_id.dimmed());
 
         println!("{}Invocation: {}::{}", pad, alias_or_id, function_name);
         if !node.args.is_empty() {

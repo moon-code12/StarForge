@@ -486,12 +486,12 @@ async fn search(query: Option<String>, json: bool) -> Result<()> {
                 ));
             }
             vec![
-                p.name,
+                p.name.clone(),
                 p.trust_state().to_string(),
-                p.publisher.unwrap_or_else(|| "unknown".to_string()),
+                p.publisher.clone().unwrap_or_else(|| "unknown".to_string()),
                 risks.join(", "),
-                p.description,
-                p.url,
+                p.description.clone(),
+                p.url.clone(),
             ]
         })
         .collect();
